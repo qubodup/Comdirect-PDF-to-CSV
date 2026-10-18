@@ -328,6 +328,7 @@ TRANSACTION_TYPES = sorted(
         "Kartenverfügung",
         "Auszahlung GAA",
         "Kartenzahlung",
+        "Devisen",
         "Dauerauftrag",
         "Wertpapiere",
         "Überweisung",
@@ -366,27 +367,55 @@ def iso_date(value):
         return value
 
 
-def extract_transaction_type(value):
-    """
-    Return (transaction type, remaining reference/additional information).
 
-    Recognized prefixes are removed from the original Vorgang field.
-    Unknown types are retained rather than guessed.
-    """
-    text = str(value or "").strip()
+def extract_transaction_type(value):
+    """Extract transaction type and keep the remaining text separately."""
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+
+    # Repair the specific word split caused by PDF extraction.
+    text = re.sub(
+        r"(?i)\bkartenverfügun\s+g\b",
+        "Kartenverfügung",
+        text,
+    )
 
     for transaction_type in TRANSACTION_TYPES:
         if text.casefold().startswith(transaction_type.casefold()):
             remainder = text[len(transaction_type):].strip()
             return transaction_type, remainder
 
-    # Do not silently discard an unfamiliar transaction type.
     return text, ""
-
 
 def make_simple_record(record):
     transaction_type, extra = extract_transaction_type(
         record.get("Vorgang (orig)", "")
+    )
+
+    booking_text = str(
+        record.get("Buchungstext (orig)", "") or ""
+    ).strip()
+
+    beneficiary = str(
+        record.get("Auftraggeber-Name", "") or ""
+    ).strip()
+
+    purpose = booking_text
+    other_parts = [extra] if extra else []
+
+    if transaction_type.casefold() == "kartenverfügung":
+        transaction_type = "Kartenverfügung"
+
+        # Separate the card details from the merchant description.
+        marker = re.search(r"(?i)\bKarte\s+Nr\.", purpose)
+
+        if marker:
+            purpose = purpose[:marker.start()].strip()
+            card_details = booking_text[marker.start():].strip()
+            if card_details:
+                other_parts.append(card_details)
+
+    other = " | ".join(
+        dict.fromkeys(part for part in other_parts if part)
     )
 
     return {
@@ -395,19 +424,12 @@ def make_simple_record(record):
             record.get("Buchungstag (orig)", "")
         ),
         "Umsatzart": transaction_type,
-        "Begünstigter / Auftraggeber": (
-            record.get("Auftraggeber-Name", "")
-        ),
-        "Verwendungszweck": (
-            record.get("Buchungstext (orig)", "")
-        ),
-        "Betrag": (
-            record.get("Ausgang/Eingang (orig)", "")
-        ),
+        "Begünstigter / Auftraggeber": beneficiary,
+        "Verwendungszweck": purpose,
+        "Betrag": record.get("Ausgang/Eingang (orig)", ""),
         "Währung": "EUR",
-        "Sonstiges": extra,
+        "Sonstiges": other,
     }
-
 
 def write_csv(records, path, headers):
     """Write a German Excel-friendly CSV using semicolons."""
