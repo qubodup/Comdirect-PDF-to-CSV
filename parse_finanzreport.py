@@ -306,6 +306,122 @@ OUTPUT_HEADERS = list(PRINT_HEADERS) + [
 ]
 
 
+SIMPLE_HEADERS = [
+    "Konto",
+    "Buchungstag",
+    "Umsatzart",
+    "Begünstigter / Auftraggeber",
+    "Verwendungszweck",
+    "Betrag",
+    "Währung",
+    "Sonstiges",
+]
+
+# Match the longest known transaction-type prefixes first.
+TRANSACTION_TYPES = sorted(
+    [
+        "Lastschrift / Belastung",
+        "Übertrag / Überweisung",
+        "Gutschrift / Überweisung",
+        "Überweisung / Gutschrift",
+        "Wertpapierabrechnung",
+        "Kartenverfügung",
+        "Auszahlung GAA",
+        "Kartenzahlung",
+        "Dauerauftrag",
+        "Wertpapiere",
+        "Überweisung",
+        "Gutschrift",
+        "Lastschrift",
+        "Entgelte",
+        "Belastung",
+        "Übertrag",
+        "Auszahlung",
+        "Einzahlung",
+        "Zinsen",
+        "Scheck",
+    ],
+    key=len,
+    reverse=True,
+)
+
+
+def iso_date(value):
+    """Convert German dates to ISO format, supporting two-digit years."""
+    value = str(value or "").strip()
+    match = re.fullmatch(r"A?(\d{2})\.(\d{2})\.(\d{2}|\d{4})", value)
+
+    if not match:
+        return value
+
+    day, month, year = match.groups()
+    if len(year) == 2:
+        year = ("20" if int(year) <= 69 else "19") + year
+
+    try:
+        return datetime(
+            int(year), int(month), int(day)
+        ).strftime("%Y-%m-%d")
+    except ValueError:
+        return value
+
+
+def extract_transaction_type(value):
+    """
+    Return (transaction type, remaining reference/additional information).
+
+    Recognized prefixes are removed from the original Vorgang field.
+    Unknown types are retained rather than guessed.
+    """
+    text = str(value or "").strip()
+
+    for transaction_type in TRANSACTION_TYPES:
+        if text.casefold().startswith(transaction_type.casefold()):
+            remainder = text[len(transaction_type):].strip()
+            return transaction_type, remainder
+
+    # Do not silently discard an unfamiliar transaction type.
+    return text, ""
+
+
+def make_simple_record(record):
+    transaction_type, extra = extract_transaction_type(
+        record.get("Vorgang (orig)", "")
+    )
+
+    return {
+        "Konto": "comdirect",
+        "Buchungstag": iso_date(
+            record.get("Buchungstag (orig)", "")
+        ),
+        "Umsatzart": transaction_type,
+        "Begünstigter / Auftraggeber": (
+            record.get("Auftraggeber-Name", "")
+        ),
+        "Verwendungszweck": (
+            record.get("Buchungstext (orig)", "")
+        ),
+        "Betrag": (
+            record.get("Ausgang/Eingang (orig)", "")
+        ),
+        "Währung": "EUR",
+        "Sonstiges": extra,
+    }
+
+
+def write_csv(records, path, headers):
+    """Write a German Excel-friendly CSV using semicolons."""
+    with path.open("w", encoding="utf-8-sig", newline="") as output_file:
+        writer = csv.DictWriter(
+            output_file,
+            fieldnames=headers,
+            delimiter=";",
+            extrasaction="ignore",
+        )
+        writer.writeheader()
+        writer.writerows(records)
+
+
 def main():
     script_dir = Path(__file__).resolve().parent
     pdf_files = sorted(
@@ -344,15 +460,33 @@ def main():
         output_path = script_dir / f"Finanzreport_Umsaetze_{timestamp}_{suffix}.csv"
         suffix += 1
 
-    with output_path.open("w", encoding="utf-8", newline="") as output_file:
-        writer = csv.DictWriter(output_file, fieldnames=OUTPUT_HEADERS, delimiter=";", extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(records)
+    
+    # Keep the existing detailed CSV.
+    write_csv(records, output_path, OUTPUT_HEADERS)
+
+    # Also generate the simplified CSV from the same transactions.
+    simple_records = [
+        make_simple_record(record)
+        for record in records
+    ]
+
+    simple_path = script_dir / (
+        f"Finanzreport_Umsaetze_einfach_{timestamp}.csv"
+    )
+
+    suffix = 2
+    while simple_path.exists():
+        simple_path = script_dir / (
+            f"Finanzreport_Umsaetze_einfach_{timestamp}_{suffix}.csv"
+        )
+        suffix += 1
+
+    write_csv(simple_records, simple_path, SIMPLE_HEADERS)
 
     print(f"Fertig: {len(records)} Umsätze aus {len(pdf_files)} PDF(s) verarbeitet.")
-    print(f"CSV: {output_path.name}")
+    print(f"Detaillierte CSV: {output_path.name}")
+    print(f"Vereinfachte CSV: {simple_path.name}")
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())
